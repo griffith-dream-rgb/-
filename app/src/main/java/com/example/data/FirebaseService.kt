@@ -21,6 +21,7 @@ object FirebaseService {
     lateinit var usersRef: DatabaseReference
     lateinit var chatsRef: DatabaseReference
     lateinit var messagesRef: DatabaseReference
+    lateinit var customAppsRef: DatabaseReference
 
     fun init(context: Context) {
         if (isInitialized) return
@@ -46,6 +47,7 @@ object FirebaseService {
             usersRef = database.getReference("users")
             chatsRef = database.getReference("chats")
             messagesRef = database.getReference("messages")
+            customAppsRef = database.getReference("custom_web_apps")
 
             isInitialized = true
             Log.d(TAG, "Firebase initialized successfully.")
@@ -361,6 +363,9 @@ object FirebaseService {
         replyToId: String = "",
         replyToText: String = "",
         replyToSenderName: String = "",
+        scheduledTime: Long = 0L,
+        webAppUrl: String = "",
+        webAppName: String = "",
         onComplete: (Boolean) -> Unit = {}
     ) {
         if (!isInitialized) return
@@ -376,23 +381,48 @@ object FirebaseService {
             timestamp = System.currentTimeMillis(),
             replyToId = replyToId,
             replyToText = replyToText,
-            replyToSenderName = replyToSenderName
+            replyToSenderName = replyToSenderName,
+            scheduledTime = scheduledTime,
+            webAppUrl = webAppUrl,
+            webAppName = webAppName
         )
 
         messagesRef.child(chatId).child(msgId).setValue(message)
             .addOnCompleteListener { task ->
                 if (task.isSuccessful) {
-                    // Update chat last message
-                    val updates = mapOf<String, Any>(
-                        "lastMessage" to text,
-                        "lastMessageTime" to System.currentTimeMillis()
-                    )
-                    chatsRef.child(chatId).updateChildren(updates)
+                    if (scheduledTime == 0L) {
+                        // Update chat last message
+                        val updates = mapOf<String, Any>(
+                            "lastMessage" to text,
+                            "lastMessageTime" to System.currentTimeMillis()
+                        )
+                        chatsRef.child(chatId).updateChildren(updates)
+                    }
                     onComplete(true)
                 } else {
                     onComplete(false)
                 }
             }
+    }
+
+    fun editMessage(chatId: String, messageId: String, newText: String, onComplete: (Boolean) -> Unit = {}) {
+        if (!isInitialized) return
+        val updates = mapOf<String, Any>(
+            "text" to newText,
+            "isEdited" to true
+        )
+        messagesRef.child(chatId).child(messageId).updateChildren(updates)
+            .addOnCompleteListener { onComplete(it.isSuccessful) }
+    }
+
+    fun deleteMessage(chatId: String, messageId: String, onComplete: (Boolean) -> Unit = {}) {
+        if (!isInitialized) return
+        val updates = mapOf<String, Any>(
+            "text" to "Сообщение удалено",
+            "isDeleted" to true
+        )
+        messagesRef.child(chatId).child(messageId).updateChildren(updates)
+            .addOnCompleteListener { onComplete(it.isSuccessful) }
     }
 
     fun deleteChat(chatId: String, onComplete: (Boolean) -> Unit) {
@@ -409,6 +439,15 @@ object FirebaseService {
                     onComplete(false)
                 }
             }
+    }
+
+    fun archiveChat(chatId: String, isArchived: Boolean) {
+        val uid = currentUid ?: return
+        if (isArchived) {
+            usersRef.child(uid).child("archivedChats").child(chatId).setValue(true)
+        } else {
+            usersRef.child(uid).child("archivedChats").child(chatId).removeValue()
+        }
     }
 
     fun leaveChat(chatId: String, userId: String, onComplete: (Boolean) -> Unit) {
@@ -529,6 +568,57 @@ object FirebaseService {
             override fun onCancelled(error: DatabaseError) {}
         }
         chatsRef.child(chatId).child("typing").addValueEventListener(listener)
+        return listener
+    }
+
+    fun createCustomWebApp(name: String, url: String, creatorName: String, onComplete: (Boolean) -> Unit) {
+        if (!isInitialized) {
+            onComplete(false)
+            return
+        }
+        val myId = currentUid ?: return
+        val appId = customAppsRef.push().key ?: return
+        val webApp = CustomWebApp(
+            id = appId,
+            name = name,
+            url = url,
+            creatorId = myId,
+            creatorName = creatorName
+        )
+        customAppsRef.child(appId).setValue(webApp)
+            .addOnCompleteListener { task ->
+                onComplete(task.isSuccessful)
+            }
+    }
+
+    fun deleteCustomWebApp(id: String, onComplete: (Boolean) -> Unit) {
+        if (!isInitialized) {
+            onComplete(false)
+            return
+        }
+        customAppsRef.child(id).removeValue()
+            .addOnCompleteListener { task ->
+                onComplete(task.isSuccessful)
+            }
+    }
+
+    fun observeCustomWebApps(onUpdate: (List<CustomWebApp>) -> Unit): ValueEventListener? {
+        if (!isInitialized) return null
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val list = mutableListOf<CustomWebApp>()
+                for (child in snapshot.children) {
+                    val app = child.getValue(CustomWebApp::class.java)
+                    if (app != null) {
+                        list.add(app)
+                    }
+                }
+                onUpdate(list)
+            }
+
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        customAppsRef.addValueEventListener(listener)
         return listener
     }
 }

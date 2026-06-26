@@ -9,13 +9,14 @@ data class TelegramUser(
     val photoUrl: String = "",
     val status: String = "offline",
     val lastSeen: Long = 0L,
-    val username: String = ""
+    val username: String = "",
+    val archivedChats: Map<String, Boolean> = emptyMap()
 )
 
 data class TelegramChat(
     val id: String = "",
     val name: String = "",
-    val type: String = "DIRECT", // "DIRECT", "GROUP", "CHANNEL"
+    val type: String = "DIRECT", // "DIRECT", "GROUP", "CHANNEL", "SAVED"
     val lastMessage: String = "",
     val lastMessageTime: Long = 0L,
     val creatorId: String = "",
@@ -38,5 +39,19 @@ data class TelegramMessage(
     val isRead: Boolean = false,
     val replyToId: String = "",
     val replyToText: String = "",
-    val replyToSenderName: String = ""
+    val replyToSenderName: String = "",
+    val isEdited: Boolean = false,
+    val isDeleted: Boolean = false,
+    val scheduledTime: Long = 0L,
+    val webAppUrl: String = "",
+    val webAppName: String = ""
 )
+
+data class CustomWebApp(
+    val id: String = "",
+    val name: String = "",
+    val url: String = "",
+    val creatorId: String = "",
+    val creatorName: String = ""
+)
+

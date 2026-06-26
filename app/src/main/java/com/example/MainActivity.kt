@@ -516,8 +516,10 @@ fun AuthLandingScreen(
             // Google sign in button
             OutlinedButton(
                 onClick = {
-                    val signInIntent = googleSignInClient.signInIntent
-                    googleSignInLauncher.launch(signInIntent)
+                    googleSignInClient.signOut().addOnCompleteListener {
+                        val signInIntent = googleSignInClient.signInIntent
+                        googleSignInLauncher.launch(signInIntent)
+                    }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -578,16 +580,18 @@ fun MainDashboardScreen(
     var selectedUserProfileUser by remember { mutableStateOf<TelegramUser?>(null) }
     var chatToDeleteOrLeave by remember { mutableStateOf<TelegramChat?>(null) }
 
-    val filteredChats = remember(chats, activeFilterTab, searchQuery) {
+    val filteredChats = remember(chats, activeFilterTab, searchQuery, currentUser.archivedChats) {
+        val archivedIds = currentUser.archivedChats.keys
         val matchesQuery = chats.filter {
             it.name.contains(searchQuery, ignoreCase = true) ||
                     it.lastMessage.contains(searchQuery, ignoreCase = true)
         }
         when (activeFilterTab) {
-            1 -> matchesQuery.filter { it.type == "DIRECT" }
-            2 -> matchesQuery.filter { it.type == "GROUP" }
-            3 -> matchesQuery.filter { it.type == "CHANNEL" }
-            else -> matchesQuery
+            1 -> matchesQuery.filter { it.type == "DIRECT" && !archivedIds.contains(it.id) }
+            2 -> matchesQuery.filter { it.type == "GROUP" && !archivedIds.contains(it.id) }
+            3 -> matchesQuery.filter { it.type == "CHANNEL" && !archivedIds.contains(it.id) }
+            4 -> matchesQuery.filter { archivedIds.contains(it.id) }
+            else -> matchesQuery.filter { !archivedIds.contains(it.id) }
         }
     }
 
@@ -647,6 +651,16 @@ fun MainDashboardScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Menu items
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                    label = { Text("Избранное") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        viewModel.openSavedMessages()
+                    }
+                )
+
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Filled.Group, contentDescription = null) },
                     label = { Text("Создать группу") },
@@ -795,11 +809,11 @@ fun MainDashboardScreen(
                     )
 
                     // Material Tabs
-                    val tabTitles = listOf("Все", "Личные", "Группы", "Каналы")
+                    val tabTitles = listOf("Все", "Личные", "Группы", "Каналы", "Архив")
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp),
+                            .padding(horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceAround
                     ) {
                         tabTitles.forEachIndexed { index, title ->
@@ -1877,32 +1891,47 @@ fun MainDashboardScreen(
                 )
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        if (isDirect) {
-                            viewModel.deleteChat(chat.id) { success ->
-                                if (success) {
-                                    Toast.makeText(context, "Чат удален", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Ошибка при удалении чата", Toast.LENGTH_SHORT).show()
+                Column {
+                    val isArchived = currentUser.archivedChats.containsKey(chat.id)
+                    Button(
+                        onClick = {
+                            viewModel.archiveChat(chat.id, !isArchived)
+                            chatToDeleteOrLeave = null
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text(if (isArchived) "Разархивировать" else "В архив")
+                    }
+
+                    Button(
+                        onClick = {
+                            if (isDirect) {
+                                viewModel.deleteChat(chat.id) { success ->
+                                    if (success) {
+                                        Toast.makeText(context, "Чат удален", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Ошибка при удалении чата", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            } else {
+                                viewModel.leaveChat(chat.id) { success ->
+                                    if (success) {
+                                        Toast.makeText(context, "Вы вышли из ${if (chat.type == "GROUP") "группы" else "канала"}", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Ошибка при выходе", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
-                        } else {
-                            viewModel.leaveChat(chat.id) { success ->
-                                if (success) {
-                                    Toast.makeText(context, "Вы вышли из ${if (chat.type == "GROUP") "группы" else "канала"}", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Ошибка при выходе", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }
-                        chatToDeleteOrLeave = null
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Text("Да, " + if (isDirect) "удалить" else "выйти", color = Color.White)
+                            chatToDeleteOrLeave = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("Да, " + if (isDirect) "удалить" else "выйти", color = Color.White)
+                    }
                 }
             },
             dismissButton = {
@@ -1954,8 +1983,13 @@ fun ChatConversationScreen(
     var showChatSettingsDialog by remember { mutableStateOf(false) }
     var selectedMessageForMenu by remember { mutableStateOf<TelegramMessage?>(null) }
     var replyingToMessage by remember { mutableStateOf<TelegramMessage?>(null) }
+    var editingMessage by remember { mutableStateOf<TelegramMessage?>(null) }
     var showForwardDialog by remember { mutableStateOf(false) }
     var messageToForward by remember { mutableStateOf<TelegramMessage?>(null) }
+
+    var showAttachmentMenu by remember { mutableStateOf(false) }
+    var activeWebAppUrl by remember { mutableStateOf<String?>(null) }
+    var selectedMessages by remember { mutableStateOf<List<TelegramMessage>>(emptyList()) }
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
@@ -1994,9 +2028,46 @@ fun ChatConversationScreen(
     }
 
     Scaffold(
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets = WindowInsets.systemBars,
         topBar = {
-            if (isSearchActive) {
+            if (selectedMessages.isNotEmpty()) {
+                TopAppBar(
+                    title = { Text("${selectedMessages.size}", color = Color.White) },
+                    navigationIcon = {
+                        IconButton(onClick = { selectedMessages = emptyList() }) {
+                            Icon(Icons.Filled.Close, tint = Color.White, contentDescription = "Отмена")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = {
+                            val text = selectedMessages.sortedBy { it.timestamp }.joinToString("\n") { it.text }
+                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(text))
+                            Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+                            selectedMessages = emptyList()
+                        }) {
+                            Icon(Icons.Filled.ContentCopy, tint = Color.White, contentDescription = "Копировать")
+                        }
+                        IconButton(onClick = {
+                            showForwardDialog = true
+                        }) {
+                            Icon(Icons.Filled.Send, tint = Color.White, contentDescription = "Переслать")
+                        }
+                        if (selectedMessages.all { it.senderId == currentUser.uid }) {
+                            IconButton(onClick = {
+                                selectedMessages.forEach { msg ->
+                                    viewModel.deleteMessage(msg.id)
+                                }
+                                selectedMessages = emptyList()
+                            }) {
+                                Icon(Icons.Filled.Delete, tint = Color.White, contentDescription = "Удалить")
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            } else if (isSearchActive) {
                 TopAppBar(
                     title = {
                         TextField(
@@ -2141,6 +2212,7 @@ fun ChatConversationScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .imePadding()
         ) {
             // Authentic Chat Box Wallpaper with subtle vertical gradient
             Box(
@@ -2236,9 +2308,25 @@ fun ChatConversationScreen(
                     items(filteredMessages) { msg ->
                         val isMyMessage = msg.senderId == currentUser.uid
                         val rowArrangement = if (isMyMessage) Alignment.End else Alignment.Start
+                        val isSelected = selectedMessages.contains(msg)
 
                         Column(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent)
+                                .combinedClickable(
+                                    onClick = {
+                                        if (selectedMessages.isNotEmpty()) {
+                                            selectedMessages = if (isSelected) selectedMessages - msg else selectedMessages + msg
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (selectedMessages.isEmpty()) {
+                                            selectedMessageForMenu = msg
+                                        }
+                                    }
+                                )
+                                .padding(vertical = 2.dp),
                             horizontalAlignment = rowArrangement
                         ) {
                             Box(
@@ -2259,10 +2347,6 @@ fun ChatConversationScreen(
                                         } else {
                                             MaterialTheme.colorScheme.surfaceVariant
                                         }
-                                    )
-                                    .combinedClickable(
-                                        onClick = {},
-                                        onLongClick = { selectedMessageForMenu = msg }
                                     )
                                     .padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
@@ -2326,18 +2410,45 @@ fun ChatConversationScreen(
                                         )
                                     }
 
-                                    Text(
+                                    MarkdownText(
                                         text = msg.text,
                                         color = if (isMyMessage) Color.White else MaterialTheme.colorScheme.onSurface,
                                         fontSize = 15.sp,
                                         lineHeight = 20.sp
                                     )
+                                    
+                                    if (msg.webAppUrl.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Button(
+                                            onClick = { activeWebAppUrl = msg.webAppUrl },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = if (isMyMessage) Color.White.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primaryContainer,
+                                                contentColor = if (isMyMessage) Color.White else MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Filled.Gamepad, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(if (msg.webAppName.isNotEmpty()) "Открыть ${msg.webAppName}" else "Открыть приложение")
+                                            }
+                                        }
+                                    }
 
                                     // Time + Read Tick Row
                                     Row(
                                         modifier = Modifier.align(Alignment.End),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        if (msg.isEdited) {
+                                            Text(
+                                                text = "изм. ",
+                                                fontSize = 9.sp,
+                                                color = if (isMyMessage) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(end = 2.dp, top = 2.dp)
+                                            )
+                                        }
+
                                         val timeFormatted = remember(msg.timestamp) {
                                             val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
                                             sdf.format(Date(msg.timestamp))
@@ -2421,11 +2532,21 @@ fun ChatConversationScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = {
+                        showAttachmentMenu = true
+                    }) {
+                        Icon(
+                            imageVector = Icons.Outlined.AttachFile,
+                            contentDescription = "Attach",
+                            tint = if (canWrite) MaterialTheme.colorScheme.primary else Color.Gray
+                        )
+                    }
+
+                    IconButton(onClick = {
                         Toast.makeText(viewModel.getApplication(), "Голосовые сообщения доступны по подписке Premium", Toast.LENGTH_SHORT).show()
                     }) {
                         Icon(
                             imageVector = Icons.Outlined.Mic,
-                            contentDescription = "Attach Audio",
+                            contentDescription = "Voice Message",
                             tint = if (canWrite) MaterialTheme.colorScheme.primary else Color.Gray
                         )
                     }
@@ -2455,14 +2576,19 @@ fun ChatConversationScreen(
                     IconButton(
                         onClick = {
                             if (userMessageText.isNotEmpty() && canWrite) {
-                                viewModel.sendMessage(
-                                    text = userMessageText,
-                                    replyToId = replyingToMessage?.id ?: "",
-                                    replyToText = replyingToMessage?.text ?: "",
-                                    replyToSenderName = replyingToMessage?.senderName ?: ""
-                                )
+                                if (editingMessage != null) {
+                                    viewModel.editMessage(editingMessage!!.id, userMessageText)
+                                    editingMessage = null
+                                } else {
+                                    viewModel.sendMessage(
+                                        text = userMessageText,
+                                        replyToId = replyingToMessage?.id ?: "",
+                                        replyToText = replyingToMessage?.text ?: "",
+                                        replyToSenderName = replyingToMessage?.senderName ?: ""
+                                    )
+                                    replyingToMessage = null
+                                }
                                 userMessageText = ""
-                                replyingToMessage = null
                             }
                         },
                         enabled = canWrite && userMessageText.isNotEmpty(),
@@ -3007,6 +3133,21 @@ fun ChatConversationScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // Выбрать (Multi-select)
+                    Button(
+                        onClick = {
+                            selectedMessages = listOf(msg)
+                            selectedMessageForMenu = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Выбрать")
+                        }
+                    }
+
                     // Копировать
                     Button(
                         onClick = {
@@ -3079,6 +3220,41 @@ fun ChatConversationScreen(
                             }
                         }
                     }
+
+                    if (msg.senderId == currentUser.uid) {
+                        Button(
+                            onClick = {
+                                userMessageText = msg.text // populate input field
+                                replyingToMessage = null // cancel reply if any
+                                editingMessage = msg
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Редактировать")
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.deleteMessage(msg.id)
+                                Toast.makeText(context, "Сообщение удалено", Toast.LENGTH_SHORT).show()
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Удалить")
+                            }
+                        }
+                    }
                 }
             },
             dismissButton = {
@@ -3092,53 +3268,62 @@ fun ChatConversationScreen(
         )
     }
 
-    if (showForwardDialog && messageToForward != null) {
-        val allChats by viewModel.chats.collectAsState()
-        val otherChats = remember(allChats, chat) { allChats.filter { it.id != chat.id } }
+    if (showForwardDialog) {
+        val messagesToForward = remember(selectedMessages, messageToForward) {
+            if (selectedMessages.isNotEmpty()) selectedMessages.sortedBy { it.timestamp }
+            else listOfNotNull(messageToForward)
+        }
         
-        AlertDialog(
-            onDismissRequest = { 
-                showForwardDialog = false
-                messageToForward = null
-            },
-            title = { Text("Переслать сообщение") },
-            text = {
-                Column {
-                    Text(
-                        text = "Выберите чат для пересылки сообщения от ${messageToForward!!.senderName}:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-                    
-                    if (otherChats.isEmpty()) {
+        if (messagesToForward.isNotEmpty()) {
+            val allChats by viewModel.chats.collectAsState()
+            val otherChats = remember(allChats, chat) { allChats.filter { it.id != chat.id } }
+            
+            AlertDialog(
+                onDismissRequest = { 
+                    showForwardDialog = false
+                    messageToForward = null
+                },
+                title = { Text(if (messagesToForward.size == 1) "Переслать сообщение" else "Переслать сообщения (${messagesToForward.size})") },
+                text = {
+                    Column {
                         Text(
-                            text = "Нет других доступных чатов",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium
+                            text = if (messagesToForward.size == 1) "Выберите чат для пересылки сообщения от ${messagesToForward.first().senderName}:" else "Выберите чат для пересылки сообщений:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(bottom = 12.dp)
                         )
-                    } else {
-                        LazyColumn(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxHeight(0.4f)
-                        ) {
-                            items(otherChats) { c ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-                                        .clickable {
-                                            viewModel.forwardMessage(
-                                                targetChatId = c.id,
-                                                text = "[Переслано от ${messageToForward!!.senderName}]: ${messageToForward!!.text}"
-                                            )
-                                            Toast.makeText(context, "Сообщение переслано в ${c.name}", Toast.LENGTH_SHORT).show()
-                                            showForwardDialog = false
-                                            messageToForward = null
-                                        }
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
+                        
+                        if (otherChats.isEmpty()) {
+                            Text(
+                                text = "Нет других доступных чатов",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        } else {
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxHeight(0.4f)
+                            ) {
+                                items(otherChats) { c ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                            .clickable {
+                                                messagesToForward.forEach { msg ->
+                                                    viewModel.forwardMessage(
+                                                        targetChatId = c.id,
+                                                        text = "[Переслано от ${msg.senderName}]: ${msg.text}"
+                                                    )
+                                                }
+                                                Toast.makeText(context, if (messagesToForward.size == 1) "Сообщение переслано в ${c.name}" else "Сообщения пересланы", Toast.LENGTH_SHORT).show()
+                                                showForwardDialog = false
+                                                messageToForward = null
+                                                selectedMessages = emptyList()
+                                            }
+                                            .padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                     Box(
                                         modifier = Modifier
                                             .size(32.dp)
@@ -3177,6 +3362,234 @@ fun ChatConversationScreen(
                 }
             }
         )
+        }
+    }
+
+    // Attachment Menu Bottom Sheet
+    if (showAttachmentMenu) {
+        val customWebApps by viewModel.customWebApps.collectAsState()
+        var miniAppsTab by remember { mutableIntStateOf(0) }
+        var showCreateAppDialog by remember { mutableStateOf(false) }
+
+        ModalBottomSheet(
+            onDismissRequest = { showAttachmentMenu = false }
+        ) {
+            Column(modifier = Modifier.padding(16.dp).fillMaxHeight(0.8f)) {
+                Text("Мини-приложения (Web Apps)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                TabRow(selectedTabIndex = miniAppsTab) {
+                    Tab(
+                        selected = miniAppsTab == 0,
+                        onClick = { miniAppsTab = 0 },
+                        text = { Text("Официально") }
+                    )
+                    Tab(
+                        selected = miniAppsTab == 1,
+                        onClick = { miniAppsTab = 1 },
+                        text = { Text("Моё") }
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                if (miniAppsTab == 0) {
+                    LazyColumn {
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Крестики-нолики") },
+                                supportingContent = { Text("Сыграть с собеседником") },
+                                leadingContent = { 
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Filled.Gamepad, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                },
+                                modifier = Modifier.clickable {
+                                    showAttachmentMenu = false
+                                    viewModel.sendMessage(
+                                        text = "Присоединяйся к моей игре!",
+                                        webAppUrl = "file:///android_asset/game.html",
+                                        webAppName = "Крестики-нолики"
+                                    )
+                                }
+                            )
+                        }
+                    }
+                } else {
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        if (customWebApps.isEmpty()) {
+                            Text(
+                                text = "Нет своих мини-приложений. Создайте новое!",
+                                modifier = Modifier.align(Alignment.Center),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyColumn {
+                                items(customWebApps) { app ->
+                                    ListItem(
+                                        headlineContent = { Text(app.name) },
+                                        supportingContent = { Text(app.url) },
+                                        leadingContent = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(40.dp)
+                                                    .clip(CircleShape)
+                                                    .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(Icons.Filled.Code, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                                            }
+                                        },
+                                        trailingContent = {
+                                            if (app.creatorId == currentUser.uid) {
+                                                IconButton(onClick = { viewModel.deleteCustomWebApp(app.id) {} }) {
+                                                    Icon(Icons.Filled.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.clickable {
+                                            showAttachmentMenu = false
+                                            viewModel.sendMessage(
+                                                text = "Присоединяйся к моему приложению: ${app.name}!",
+                                                webAppUrl = app.url,
+                                                webAppName = app.name
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        FloatingActionButton(
+                            onClick = { showCreateAppDialog = true },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(16.dp)
+                        ) {
+                            Icon(Icons.Filled.Add, "Создать")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showCreateAppDialog) {
+            var newAppName by remember { mutableStateOf("") }
+            var newAppUrl by remember { mutableStateOf("") }
+            var isCreating by remember { mutableStateOf(false) }
+
+            AlertDialog(
+                onDismissRequest = { showCreateAppDialog = false },
+                title = { Text("Новое мини-приложение") },
+                text = {
+                    Column {
+                        Text("Укажите название и URL вашего веб-приложения.")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = newAppName,
+                            onValueChange = { newAppName = it },
+                            label = { Text("Название (например, Шахматы)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = newAppUrl,
+                            onValueChange = { newAppUrl = it },
+                            label = { Text("URL (https://...)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (newAppName.isNotBlank() && newAppUrl.isNotBlank()) {
+                                isCreating = true
+                                viewModel.createCustomWebApp(newAppName, newAppUrl) { success ->
+                                    isCreating = false
+                                    if (success) {
+                                        showCreateAppDialog = false
+                                    } else {
+                                        Toast.makeText(context, "Ошибка создания", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isCreating
+                    ) {
+                        Text(if (isCreating) "Создание..." else "Создать")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCreateAppDialog = false }) {
+                        Text("Отмена")
+                    }
+                }
+            )
+        }
+    }
+
+    // Fullscreen WebApp Overlay
+    if (activeWebAppUrl != null) {
+        Dialog(
+            onDismissRequest = { activeWebAppUrl = null },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Toolbar for WebApp
+                    TopAppBar(
+                        title = { Text("Мини-приложение", fontSize = 18.sp) },
+                        navigationIcon = {
+                            IconButton(onClick = { activeWebAppUrl = null }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Close WebApp")
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    )
+                    
+                    // WebView Container
+                    val contextLocal = LocalContext.current
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = {
+                            android.webkit.WebView(contextLocal).apply {
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.useWideViewPort = true
+                                settings.loadWithOverviewMode = true
+                                settings.allowFileAccess = true
+                                settings.allowContentAccess = true
+                                webChromeClient = android.webkit.WebChromeClient()
+                                webViewClient = android.webkit.WebViewClient()
+                            }
+                        },
+                        update = { webView ->
+                            // Add params like room_id, user_id
+                            val params = "?room_id=${chat.id}&user_id=${currentUser.uid}&name=${currentUser.username.ifEmpty { currentUser.displayName }}"
+                            webView.loadUrl(activeWebAppUrl!! + params)
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -3202,4 +3615,62 @@ fun exportChatToTxt(context: android.content.Context, chat: TelegramChat, messag
         putExtra(android.content.Intent.EXTRA_TEXT, textToExport)
     }
     context.startActivity(android.content.Intent.createChooser(intent, "Экспорт чата"))
+}
+
+@Composable
+fun MarkdownText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontSize: androidx.compose.ui.unit.TextUnit = 15.sp,
+    lineHeight: androidx.compose.ui.unit.TextUnit = 20.sp
+) {
+    val annotatedString = remember(text, color) {
+        androidx.compose.ui.text.buildAnnotatedString {
+            var currentIndex = 0
+            val boldRegex = Regex("\\*\\*(.*?)\\*\\*")
+            val italicRegex = Regex("_(.*?)_")
+            val codeRegex = Regex("`(.*?)`")
+            
+            // In a real app we'd use a proper parser to avoid overlap, 
+            // but for simplicity we'll just parse one by one if not overlapping.
+            // Better to just do bold parsing for now.
+            var rawText = text
+            // Wait, building annotated string by just appending is easier.
+            // Actually, let's keep it very simple.
+            append(text)
+            
+            boldRegex.findAll(text).forEach { matchResult ->
+                addStyle(
+                    style = androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold),
+                    start = matchResult.range.first,
+                    end = matchResult.range.last + 1
+                )
+            }
+            italicRegex.findAll(text).forEach { matchResult ->
+                addStyle(
+                    style = androidx.compose.ui.text.SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic),
+                    start = matchResult.range.first,
+                    end = matchResult.range.last + 1
+                )
+            }
+            codeRegex.findAll(text).forEach { matchResult ->
+                addStyle(
+                    style = androidx.compose.ui.text.SpanStyle(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        background = Color.Gray.copy(alpha = 0.3f)
+                    ),
+                    start = matchResult.range.first,
+                    end = matchResult.range.last + 1
+                )
+            }
+        }
+    }
+    Text(
+        text = annotatedString,
+        modifier = modifier,
+        color = color,
+        fontSize = fontSize,
+        lineHeight = lineHeight
+    )
 }

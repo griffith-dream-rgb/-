@@ -51,12 +51,16 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
     private val _unreadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
     val unreadCounts: StateFlow<Map<String, Int>> = _unreadCounts.asStateFlow()
 
+    private val _customWebApps = MutableStateFlow<List<com.example.data.CustomWebApp>>(emptyList())
+    val customWebApps: StateFlow<List<com.example.data.CustomWebApp>> = _customWebApps.asStateFlow()
+
     private val chatsMessagesListeners = mutableMapOf<String, ValueEventListener>()
 
     private var chatsListener: ValueEventListener? = null
     private var messagesListener: ValueEventListener? = null
     private var typingListener: ValueEventListener? = null
     private var currentUserListener: ValueEventListener? = null
+    private var customWebAppsListener: ValueEventListener? = null
 
     init {
         FirebaseService.init(application)
@@ -223,6 +227,7 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun startObservingChats() {
+        startObservingCustomWebApps()
         chatsListener?.let { FirebaseService.chatsRef.removeEventListener(it) }
         chatsListener = FirebaseService.observeChats { chatList ->
             _chats.value = chatList
@@ -326,19 +331,61 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun openSavedMessages() {
+        val myId = FirebaseService.currentUid ?: return
+        val savedChat = _chats.value.find { it.type == "SAVED" }
+        if (savedChat != null) {
+            selectChat(savedChat)
+        } else {
+            FirebaseService.createChat(
+                name = "Избранное",
+                type = "SAVED",
+                members = emptyList(),
+                isPrivate = true
+            ) { chatId ->
+                if (chatId != null) {
+                    val newChat = TelegramChat(
+                        id = chatId,
+                        name = "Избранное",
+                        type = "SAVED",
+                        creatorId = myId,
+                        members = mapOf(myId to true)
+                    )
+                    selectChat(newChat)
+                }
+            }
+        }
+    }
+
     fun setTypingStatus(isTyping: Boolean) {
         val chat = _activeChat.value ?: return
         FirebaseService.setTypingStatus(chat.id, isTyping)
+    }
+
+    fun archiveChat(chatId: String, isArchived: Boolean) {
+        FirebaseService.archiveChat(chatId, isArchived)
+    }
+
+    fun editMessage(messageId: String, newText: String) {
+        val chat = _activeChat.value ?: return
+        FirebaseService.editMessage(chat.id, messageId, newText)
+    }
+
+    fun deleteMessage(messageId: String) {
+        val chat = _activeChat.value ?: return
+        FirebaseService.deleteMessage(chat.id, messageId)
     }
 
     fun sendMessage(
         text: String,
         replyToId: String = "",
         replyToText: String = "",
-        replyToSenderName: String = ""
+        replyToSenderName: String = "",
+        webAppUrl: String = "",
+        webAppName: String = ""
     ) {
         val chat = _activeChat.value ?: return
-        if (text.isBlank()) return
+        if (text.isBlank() && webAppUrl.isBlank()) return
         val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
 
         FirebaseService.sendMessage(
@@ -347,7 +394,9 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
             senderName = myUser.displayName,
             replyToId = replyToId,
             replyToText = replyToText,
-            replyToSenderName = replyToSenderName
+            replyToSenderName = replyToSenderName,
+            webAppUrl = webAppUrl,
+            webAppName = webAppName
         )
     }
 
@@ -530,6 +579,7 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
                 val updated = myUser.copy(username = cleanUsername)
                 FirebaseService.saveUser(updated) { success ->
                     if (success) {
+                        _authState.value = AuthState.Authenticated(updated)
                         onComplete(null) // success, no error message
                     } else {
                         onComplete("Ошибка сохранения профиля")
@@ -577,6 +627,7 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
             if (uid != null) FirebaseService.usersRef.child(uid).removeEventListener(it)
         }
         chatsListener?.let { FirebaseService.chatsRef.removeEventListener(it) }
+        customWebAppsListener?.let { FirebaseService.customAppsRef.removeEventListener(it) }
         messagesListener?.let { listener ->
             val chatId = _activeChat.value?.id
             if (chatId != null) FirebaseService.messagesRef.child(chatId).removeEventListener(listener)
@@ -606,6 +657,7 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
             if (uid != null) FirebaseService.usersRef.child(uid).removeEventListener(it)
         }
         chatsListener?.let { FirebaseService.chatsRef.removeEventListener(it) }
+        customWebAppsListener?.let { FirebaseService.customAppsRef.removeEventListener(it) }
         messagesListener?.let { listener ->
             val chatId = _activeChat.value?.id
             if (chatId != null) FirebaseService.messagesRef.child(chatId).removeEventListener(listener)
@@ -619,5 +671,21 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
             FirebaseService.messagesRef.child(cid).removeEventListener(listener)
         }
         chatsMessagesListeners.clear()
+    }
+
+    private fun startObservingCustomWebApps() {
+        customWebAppsListener?.let { FirebaseService.customAppsRef.removeEventListener(it) }
+        customWebAppsListener = FirebaseService.observeCustomWebApps { appList ->
+            _customWebApps.value = appList
+        }
+    }
+
+    fun createCustomWebApp(name: String, url: String, onComplete: (Boolean) -> Unit) {
+        val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
+        FirebaseService.createCustomWebApp(name, url, myUser.displayName, onComplete)
+    }
+
+    fun deleteCustomWebApp(id: String, onComplete: (Boolean) -> Unit) {
+        FirebaseService.deleteCustomWebApp(id, onComplete)
     }
 }

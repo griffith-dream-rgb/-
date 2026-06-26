@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Крестики-Нолики Мультиплеер</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDK Compat -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+        .grid-cell {
+            transition: all 0.2s ease-in-out;
+        }
+        .grid-cell:hover {
+            transform: scale(1.03);
+        }
+        .glow-x {
+            text-shadow: 0 0 10px #38bdf8, 0 0 20px #38bdf8;
+            color: #38bdf8;
+        }
+        .glow-o {
+            text-shadow: 0 0 10px #f43f5e, 0 0 20px #f43f5e;
+            color: #f43f5e;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-between min-h-screen p-4 select-none">
+
+    <!-- Header / Status -->
+    <div class="w-full max-w-md text-center mt-4">
+        <h1 class="text-2xl font-bold tracking-wider mb-2">Крестики-Нолики</h1>
+        <div id="game-status-alert" class="bg-slate-800 text-slate-300 rounded-full px-4 py-2 inline-block text-sm font-semibold shadow-md border border-slate-700 animate-pulse">
+            Подключение к серверу...
+        </div>
+    </div>
+
+    <!-- Main Game Area -->
+    <div class="w-full max-w-md flex flex-col items-center">
+        <!-- Players Info Row -->
+        <div class="flex justify-between w-full mb-6 px-4">
+            <!-- Player 1 CARD -->
+            <div id="p1-card" class="bg-slate-800 border-2 border-transparent rounded-2xl p-3 flex flex-col items-center w-[45%] shadow-lg transition-all duration-300">
+                <span class="text-xs text-sky-400 font-bold tracking-wider">ИГРОК X</span>
+                <span id="p1-name" class="text-sm font-semibold mt-1 truncate max-w-full text-slate-300">Ожидание...</span>
+                <span id="p1-you" class="hidden text-[10px] bg-sky-500/20 text-sky-400 font-bold px-2 py-0.5 rounded-full mt-1">ВЫ</span>
+            </div>
+            
+            <div class="flex items-center text-slate-500 font-bold text-xl">VS</div>
+            
+            <!-- Player 2 CARD -->
+            <div id="p2-card" class="bg-slate-800 border-2 border-transparent rounded-2xl p-3 flex flex-col items-center w-[45%] shadow-lg transition-all duration-300">
+                <span class="text-xs text-rose-400 font-bold tracking-wider">ИГРОК O</span>
+                <span id="p2-name" class="text-sm font-semibold mt-1 truncate max-w-full text-slate-300">Ожидание...</span>
+                <span id="p2-you" class="hidden text-[10px] bg-rose-500/20 text-rose-400 font-bold px-2 py-0.5 rounded-full mt-1">ВЫ</span>
+            </div>
+        </div>
+
+        <!-- 3x3 Grid Board -->
+        <div class="grid grid-cols-3 gap-3 w-72 h-72 bg-slate-800/40 p-3 rounded-3xl border border-slate-700/60 shadow-xl backdrop-blur-md">
+            <!-- Board cells -->
+            <button data-index="0" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="1" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="2" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="3" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="4" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="5" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="6" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="7" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+            <button data-index="8" class="grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50"></button>
+        </div>
+    </div>
+
+    <!-- Actions / Controls -->
+    <div class="w-full max-w-md text-center mb-6">
+        <button id="btn-restart" class="hidden bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold px-6 py-2.5 rounded-full shadow-md transition-all active:scale-95 text-sm uppercase tracking-wide">
+            Начать заново
+        </button>
+    </div>
+
+    <!-- Firebase Script Logic -->
+    <script>
+        // Firebase Config Match to App Options
+        const firebaseConfig = {
+            apiKey: "AIzaSyAZXt07diZQKQu03n4QdhJe8_IvcLd5cBE",
+            databaseURL: "https://menejer-ca10d-default-rtdb.firebaseio.com",
+            projectId: "menejer-ca10d"
+        };
+
+        // Initialize Firebase Compat
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // Get WebApp Params from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomId = urlParams.get('room_id') || 'default_room_xyz';
+        const userId = urlParams.get('user_id') || 'guest_' + Math.floor(Math.random() * 10000);
+        const userName = urlParams.get('name') || 'Гость';
+
+        const gameRef = database.ref('mini_games/' + roomId);
+
+        // Client State Variables
+        let myRole = null; // 'X', 'O', or 'spectator'
+        let gameData = null;
+
+        const cells = document.querySelectorAll('.grid-cell');
+        const statusAlert = document.getElementById('game-status-alert');
+        const p1Card = document.getElementById('p1-card');
+        const p2Card = document.getElementById('p2-card');
+        const p1Name = document.getElementById('p1-name');
+        const p2Name = document.getElementById('p2-name');
+        const p1You = document.getElementById('p1-you');
+        const p2You = document.getElementById('p2-you');
+        const btnRestart = document.getElementById('btn-restart');
+
+        // Connect to game room
+        gameRef.once('value').then(snapshot => {
+            let data = snapshot.val();
+            if (!data) {
+                // First player to enter becomes Creator/X
+                data = {
+                    players: {
+                        player1: { id: userId, name: userName }
+                    },
+                    state: {
+                        board: ["", "", "", "", "", "", "", "", ""],
+                        turn: userId,
+                        winner: "",
+                        status: "waiting"
+                    }
+                };
+                gameRef.set(data);
+                myRole = 'X';
+            } else {
+                // Room exists
+                if (!data.players) {
+                    data.players = {};
+                }
+
+                if (data.players.player1 && data.players.player1.id === userId) {
+                    myRole = 'X';
+                } else if (data.players.player2 && data.players.player2.id === userId) {
+                    myRole = 'O';
+                } else if (!data.players.player1) {
+                    // Fill player 1
+                    gameRef.child('players/player1').set({ id: userId, name: userName });
+                    myRole = 'X';
+                } else if (!data.players.player2) {
+                    // Fill player 2, transition game to playing
+                    gameRef.child('players/player2').set({ id: userId, name: userName });
+                    gameRef.child('state/status').set('playing');
+                    myRole = 'O';
+                } else {
+                    myRole = 'spectator';
+                }
+            }
+
+            // Sync Game UI
+            setupListeners();
+        });
+
+        function setupListeners() {
+            // Listen for Realtime Changes
+            gameRef.on('value', snapshot => {
+                gameData = snapshot.val();
+                if (!gameData) return;
+                updateUI();
+            });
+
+            // Grid Cell Click Actions
+            cells.forEach(cell => {
+                cell.addEventListener('click', () => {
+                    if (!gameData || !myRole || myRole === 'spectator') return;
+                    const index = parseInt(cell.getAttribute('data-index'));
+                    
+                    const state = gameData.state;
+                    if (state.status !== 'playing') return;
+                    if (state.turn !== userId) return;
+                    if (state.board[index] !== "") return;
+
+                    // Make the move locally, then sync to Firebase
+                    const newBoard = [...state.board];
+                    newBoard[index] = myRole;
+
+                    // Check winner
+                    const winnerSymbol = checkWinner(newBoard);
+                    let newStatus = 'playing';
+                    let winnerName = "";
+                    let finalWinnerSymbol = "";
+
+                    if (winnerSymbol === 'X') {
+                        newStatus = 'finished';
+                        finalWinnerSymbol = 'X';
+                        winnerName = gameData.players.player1.name;
+                    } else if (winnerSymbol === 'O') {
+                        newStatus = 'finished';
+                        finalWinnerSymbol = 'O';
+                        winnerName = gameData.players.player2 ? gameData.players.player2.name : "Игрок O";
+                    } else if (winnerSymbol === 'draw') {
+                        newStatus = 'finished';
+                        finalWinnerSymbol = 'draw';
+                    }
+
+                    // Toggle Turn to Next Player
+                    let nextTurnId = userId;
+                    if (newStatus === 'playing') {
+                        if (myRole === 'X') {
+                            nextTurnId = gameData.players.player2 ? gameData.players.player2.id : userId;
+                        } else {
+                            nextTurnId = gameData.players.player1.id;
+                        }
+                    }
+
+                    gameRef.child('state').set({
+                        board: newBoard,
+                        turn: nextTurnId,
+                        winner: finalWinnerSymbol,
+                        status: newStatus
+                    });
+                });
+            });
+
+            // Restart Button Click Action
+            btnRestart.addEventListener('click', () => {
+                if (!gameData) return;
+                // Reinitialize Board state
+                gameRef.child('state').set({
+                    board: ["", "", "", "", "", "", "", "", ""],
+                    turn: gameData.players.player1.id,
+                    winner: "",
+                    status: gameData.players.player2 ? "playing" : "waiting"
+                });
+            });
+        }
+
+        function updateUI() {
+            const state = gameData.state;
+            const players = gameData.players || {};
+
+            // Render Board Cells
+            cells.forEach((cell, idx) => {
+                const val = state.board[idx];
+                cell.innerHTML = val;
+                
+                // Clear old glow styling
+                cell.className = "grid-cell flex items-center justify-center bg-slate-800 hover:bg-slate-700/80 rounded-2xl text-4xl font-extrabold focus:outline-none focus:ring-2 focus:ring-sky-500/50";
+                
+                if (val === 'X') {
+                    cell.classList.add('glow-x');
+                } else if (val === 'O') {
+                    cell.classList.add('glow-o');
+                }
+            });
+
+            // Render Players cards
+            if (players.player1) {
+                p1Name.innerText = players.player1.name;
+                if (players.player1.id === userId) p1You.classList.remove('hidden');
+            }
+            if (players.player2) {
+                p2Name.innerText = players.player2.name;
+                if (players.player2.id === userId) p2You.classList.remove('hidden');
+            } else {
+                p2Name.innerText = "Ожидание...";
+                p2You.classList.add('hidden');
+            }
+
+            // Highlight whose turn it is
+            p1Card.className = "bg-slate-800 border-2 border-transparent rounded-2xl p-3 flex flex-col items-center w-[45%] shadow-lg transition-all duration-300";
+            p2Card.className = "bg-slate-800 border-2 border-transparent rounded-2xl p-3 flex flex-col items-center w-[45%] shadow-lg transition-all duration-300";
+
+            if (state.status === 'playing') {
+                if (state.turn === (players.player1 ? players.player1.id : '')) {
+                    p1Card.classList.add('border-sky-500', 'scale-105', 'bg-slate-800/80');
+                } else if (state.turn === (players.player2 ? players.player2.id : '')) {
+                    p2Card.classList.add('border-rose-500', 'scale-105', 'bg-slate-800/80');
+                }
+            }
+
+            // Render Alert status bar
+            statusAlert.className = "bg-slate-800 rounded-full px-4 py-2 inline-block text-sm font-semibold shadow-md border border-slate-700";
+            
+            if (state.status === 'waiting') {
+                statusAlert.innerText = "Ожидание второго соперника...";
+                statusAlert.classList.add('animate-pulse', 'text-amber-400');
+                btnRestart.classList.add('hidden');
+            } else if (state.status === 'playing') {
+                if (state.turn === userId) {
+                    statusAlert.innerText = "Ваш ход!";
+                    statusAlert.classList.add('text-green-400', 'border-green-500/30');
+                } else {
+                    statusAlert.innerText = "Ход соперника...";
+                    statusAlert.classList.add('text-slate-400');
+                }
+                btnRestart.classList.add('hidden');
+            } else if (state.status === 'finished') {
+                if (state.winner === 'draw') {
+                    statusAlert.innerText = "Ничья!";
+                    statusAlert.classList.add('text-yellow-400', 'border-yellow-500/30');
+                } else {
+                    const winnerName = state.winner === 'X' ? players.player1.name : (players.player2 ? players.player2.name : "Игрок O");
+                    statusAlert.innerText = `Победитель: ${winnerName}!`;
+                    statusAlert.classList.add('text-emerald-400', 'border-emerald-500/30');
+                }
+                // Show Restart button for actual players
+                if (myRole !== 'spectator') {
+                    btnRestart.classList.remove('hidden');
+                }
+            }
+        }
+
+        function checkWinner(board) {
+            const winLines = [
+                [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+                [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+                [0, 4, 8], [2, 4, 6]             // Diagonals
+            ];
+
+            for (let line of winLines) {
+                const [a, b, c] = line;
+                if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+                    return board[a];
+                }
+            }
+
+            if (board.every(cell => cell !== "")) {
+                return 'draw';
+            }
+
+            return null;
+        }
+    </script>
+</body>
+</html>
