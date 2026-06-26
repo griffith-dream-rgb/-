@@ -9,6 +9,8 @@ import com.example.data.TelegramChat
 import com.example.data.TelegramMessage
 import com.example.data.TelegramUser
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,11 +39,23 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
     private val _searchedUsers = MutableStateFlow<List<TelegramUser>>(emptyList())
     val searchedUsers: StateFlow<List<TelegramUser>> = _searchedUsers.asStateFlow()
 
+    private val _searchedChats = MutableStateFlow<List<TelegramChat>>(emptyList())
+    val searchedChats: StateFlow<List<TelegramChat>> = _searchedChats.asStateFlow()
+
     private val _activeChat = MutableStateFlow<TelegramChat?>(null)
     val activeChat: StateFlow<TelegramChat?> = _activeChat.asStateFlow()
 
+    private val _activeChatTypingUsers = MutableStateFlow<List<String>>(emptyList())
+    val activeChatTypingUsers: StateFlow<List<String>> = _activeChatTypingUsers.asStateFlow()
+
+    private val _unreadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val unreadCounts: StateFlow<Map<String, Int>> = _unreadCounts.asStateFlow()
+
+    private val chatsMessagesListeners = mutableMapOf<String, ValueEventListener>()
+
     private var chatsListener: ValueEventListener? = null
     private var messagesListener: ValueEventListener? = null
+    private var typingListener: ValueEventListener? = null
     private var currentUserListener: ValueEventListener? = null
 
     init {
@@ -212,54 +226,342 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
         chatsListener?.let { FirebaseService.chatsRef.removeEventListener(it) }
         chatsListener = FirebaseService.observeChats { chatList ->
             _chats.value = chatList
+
+            val currentUids = chatList.map { it.id }.toSet()
+            val removedChatIds = chatsMessagesListeners.keys.filter { it !in currentUids }
+            removedChatIds.forEach { cid ->
+                chatsMessagesListeners[cid]?.let { listener ->
+                    FirebaseService.messagesRef.child(cid).removeEventListener(listener)
+                }
+                chatsMessagesListeners.remove(cid)
+            }
+            // Filter unread counts to keep only active chat IDs
+            _unreadCounts.value = _unreadCounts.value.filterKeys { it in currentUids }
+
+            chatList.forEach { chat ->
+                if (!chatsMessagesListeners.containsKey(chat.id)) {
+                    val listener = object : ValueEventListener {
+                        override fun onDataChange(snapshot: DataSnapshot) {
+                            val myId = FirebaseService.currentUid ?: return
+                            val activeChatId = _activeChat.value?.id
+                            if (chat.id == activeChatId) {
+                                val updatedMap = _unreadCounts.value.toMutableMap()
+                                updatedMap[chat.id] = 0
+                                _unreadCounts.value = updatedMap
+                                FirebaseService.markMessagesAsRead(chat.id)
+                                return
+                            }
+                            var unreadCount = 0
+                            for (child in snapshot.children) {
+                                val msg = child.getValue(TelegramMessage::class.java)
+                                if (msg != null && msg.senderId != myId) {
+                                    val isReadDb = child.child("isRead").getValue(Boolean::class.java)
+                                        ?: child.child("read").getValue(Boolean::class.java)
+                                        ?: false
+                                    if (!isReadDb) {
+                                        unreadCount++
+                                    }
+                                }
+                            }
+                            val updatedMap = _unreadCounts.value.toMutableMap()
+                            updatedMap[chat.id] = unreadCount
+                            _unreadCounts.value = updatedMap
+                        }
+                        override fun onCancelled(error: DatabaseError) {}
+                    }
+                    FirebaseService.messagesRef.child(chat.id).addValueEventListener(listener)
+                    chatsMessagesListeners[chat.id] = listener
+                }
+            }
         }
     }
 
     fun selectChat(chat: TelegramChat?) {
-        _activeChat.value = chat
         messagesListener?.let { listener ->
             val prevChatId = _activeChat.value?.id
             if (prevChatId != null) {
                 FirebaseService.messagesRef.child(prevChatId).removeEventListener(listener)
             }
         }
+        typingListener?.let { listener ->
+            val prevChatId = _activeChat.value?.id
+            if (prevChatId != null) {
+                FirebaseService.chatsRef.child(prevChatId).child("typing").removeEventListener(listener)
+            }
+        }
+        _activeChat.value = chat
         _messages.value = emptyList()
+        _activeChatTypingUsers.value = emptyList()
 
         if (chat != null) {
+            val updatedMap = _unreadCounts.value.toMutableMap()
+            updatedMap[chat.id] = 0
+            _unreadCounts.value = updatedMap
+            FirebaseService.markMessagesAsRead(chat.id)
+
             messagesListener = FirebaseService.observeMessages(chat.id) { messageList ->
                 _messages.value = messageList
+                FirebaseService.markMessagesAsRead(chat.id)
+            }
+            typingListener = FirebaseService.observeTypingStatus(chat.id) { typingMap ->
+                val uids = typingMap.keys.toList()
+                if (uids.isEmpty()) {
+                    _activeChatTypingUsers.value = emptyList()
+                } else {
+                    val names = mutableListOf<String>()
+                    var count = 0
+                    uids.forEach { uid ->
+                        fetchUserProfile(uid) { user ->
+                            if (user != null) {
+                                names.add(user.displayName)
+                            }
+                            count++
+                            if (count == uids.size) {
+                                _activeChatTypingUsers.value = names
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    fun sendMessage(text: String) {
+    fun setTypingStatus(isTyping: Boolean) {
+        val chat = _activeChat.value ?: return
+        FirebaseService.setTypingStatus(chat.id, isTyping)
+    }
+
+    fun sendMessage(
+        text: String,
+        replyToId: String = "",
+        replyToText: String = "",
+        replyToSenderName: String = ""
+    ) {
         val chat = _activeChat.value ?: return
         if (text.isBlank()) return
         val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
 
-        FirebaseService.sendMessage(chat.id, text.trim(), myUser.displayName)
+        FirebaseService.sendMessage(
+            chatId = chat.id,
+            text = text.trim(),
+            senderName = myUser.displayName,
+            replyToId = replyToId,
+            replyToText = replyToText,
+            replyToSenderName = replyToSenderName
+        )
+    }
+
+    fun forwardMessage(
+        targetChatId: String,
+        text: String
+    ) {
+        val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
+        FirebaseService.sendMessage(
+            chatId = targetChatId,
+            text = text.trim(),
+            senderName = myUser.displayName,
+            replyToId = "",
+            replyToText = "",
+            replyToSenderName = ""
+        )
+    }
+
+    fun deleteChat(chatId: String, onResult: (Boolean) -> Unit = {}) {
+        FirebaseService.deleteChat(chatId) { success ->
+            if (success && _activeChat.value?.id == chatId) {
+                selectChat(null)
+            }
+            onResult(success)
+        }
+    }
+
+    fun leaveChat(chatId: String, onResult: (Boolean) -> Unit = {}) {
+        val myUid = FirebaseService.currentUid ?: return
+        FirebaseService.leaveChat(chatId, myUid) { success ->
+            if (success && _activeChat.value?.id == chatId) {
+                selectChat(null)
+            }
+            onResult(success)
+        }
+    }
+
+    fun kickUser(chatId: String, userId: String, onResult: (Boolean) -> Unit = {}) {
+        FirebaseService.leaveChat(chatId, userId) { success ->
+            onResult(success)
+        }
+    }
+
+    fun setAdminStatus(chatId: String, userId: String, isAdmin: Boolean, onResult: (Boolean) -> Unit = {}) {
+        FirebaseService.setAdminStatus(chatId, userId, isAdmin) { success ->
+            onResult(success)
+        }
+    }
+
+    fun updateAdminPermissions(chatId: String, userId: String, permissions: String, onResult: (Boolean) -> Unit = {}) {
+        FirebaseService.updateAdminPermissions(chatId, userId, permissions) { success ->
+            onResult(success)
+        }
+    }
+
+    fun pinMessage(chatId: String, messageId: String, onResult: (Boolean) -> Unit = {}) {
+        FirebaseService.pinMessage(chatId, messageId) { success ->
+            onResult(success)
+        }
     }
 
     fun searchUsers(query: String) {
         if (query.isBlank()) {
             _searchedUsers.value = emptyList()
+            _searchedChats.value = emptyList()
             return
         }
         FirebaseService.searchUsers(query) { list ->
             _searchedUsers.value = list
         }
+        FirebaseService.searchChats(query) { list ->
+            _searchedChats.value = list
+        }
     }
 
-    fun createChatRoom(name: String, type: String, partnerUid: String? = null) {
+    fun createChatRoom(
+        name: String,
+        type: String,
+        username: String = "",
+        isPrivate: Boolean = false,
+        partnerUid: String? = null,
+        onComplete: (String?) -> Unit = {}
+    ) {
         viewModelScope.launch {
             val members = partnerUid?.let { listOf(it) } ?: emptyList()
-            FirebaseService.createChat(name, type, members) { generatedId ->
-                if (generatedId != null) {
-                    // Create chat succeeded
-                    Log.d(TAG, "Chat room created successfully: $generatedId")
+            val cleanUsername = username.removePrefix("@").trim().lowercase()
+            val inviteKey = if (isPrivate) java.util.UUID.randomUUID().toString().take(8).uppercase() else ""
+            
+            if (type != "DIRECT" && !isPrivate && cleanUsername.isNotEmpty()) {
+                FirebaseService.checkGroupUsernameExists(cleanUsername) { exists ->
+                    if (exists) {
+                        onComplete("Этот юзернейм группы уже занят")
+                    } else {
+                        FirebaseService.createChat(name, type, members, cleanUsername, isPrivate, inviteKey) { generatedId ->
+                            if (generatedId != null) {
+                                onComplete(null) // Success
+                            } else {
+                                onComplete("Не удалось создать чат")
+                            }
+                        }
+                    }
+                }
+            } else {
+                FirebaseService.createChat(name, type, members, cleanUsername, isPrivate, inviteKey) { generatedId ->
+                    if (generatedId != null) {
+                        onComplete(null) // Success
+                    } else {
+                        onComplete("Не удалось создать чат")
+                    }
                 }
             }
         }
+    }
+
+    fun updateProfile(displayName: String, onComplete: (Boolean) -> Unit) {
+        val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
+        val updated = myUser.copy(displayName = displayName)
+        FirebaseService.saveUser(updated) { success ->
+            onComplete(success)
+        }
+    }
+
+    fun updateProfileAndUsername(displayName: String, username: String, onComplete: (String?) -> Unit) {
+        val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
+        val cleanUsername = username.removePrefix("@").trim().lowercase()
+        if (displayName.isBlank()) {
+            onComplete("Имя не может быть пустым")
+            return
+        }
+        if (cleanUsername.length < 3) {
+            onComplete("Имя пользователя слишком короткое (мин. 3 символа)")
+            return
+        }
+        val regex = "^[a-zA-Z0-9_]+$".toRegex()
+        if (!regex.matches(cleanUsername)) {
+            onComplete("Допустимы только латинские буквы, цифры и подчеркивания")
+            return
+        }
+
+        fun saveWithUsername(u: String) {
+            val updated = myUser.copy(displayName = displayName, username = u)
+            FirebaseService.saveUser(updated) { success ->
+                if (success) {
+                    onComplete(null)
+                } else {
+                    onComplete("Ошибка сохранения профиля")
+                }
+            }
+        }
+
+        if (cleanUsername == myUser.username.lowercase()) {
+            saveWithUsername(myUser.username)
+        } else {
+            FirebaseService.checkUsernameExists(cleanUsername) { exists ->
+                if (exists) {
+                    onComplete("Этот юзернейм уже занят, введите другой")
+                } else {
+                    saveWithUsername(cleanUsername)
+                }
+            }
+        }
+    }
+
+    fun saveProfileUsername(username: String, onComplete: (String?) -> Unit) {
+        val myUser = (authState.value as? AuthState.Authenticated)?.user ?: return
+        val cleanUsername = username.removePrefix("@").trim().lowercase()
+        if (cleanUsername.length < 3) {
+            onComplete("Имя пользователя слишком короткое (мин. 3 символа)")
+            return
+        }
+        val regex = "^[a-zA-Z0-9_]+$".toRegex()
+        if (!regex.matches(cleanUsername)) {
+            onComplete("Допустимы только латинские буквы, цифры и подчеркивания")
+            return
+        }
+        FirebaseService.checkUsernameExists(cleanUsername) { exists ->
+            if (exists) {
+                onComplete("Этот юзернейм уже занят, введите другой")
+            } else {
+                val updated = myUser.copy(username = cleanUsername)
+                FirebaseService.saveUser(updated) { success ->
+                    if (success) {
+                        onComplete(null) // success, no error message
+                    } else {
+                        onComplete("Ошибка сохранения профиля")
+                    }
+                }
+            }
+        }
+    }
+
+    fun joinPublicChat(chat: TelegramChat) {
+        val myId = FirebaseService.currentUid ?: return
+        FirebaseService.joinChat(chat.id, myId) { success ->
+            if (success) {
+                selectChat(chat.copy(members = chat.members + (myId to true)))
+            }
+        }
+    }
+
+    fun joinPrivateChatByInviteKey(key: String, onResult: (String?) -> Unit) {
+        val myId = FirebaseService.currentUid ?: return
+        FirebaseService.joinChatByInviteKey(key, myId) { chat ->
+            if (chat != null) {
+                selectChat(chat)
+                onResult(null) // Success
+            } else {
+                onResult("Неверный ключ приглашения или группа не найдена")
+            }
+        }
+    }
+
+    fun fetchUserProfile(uid: String, onResult: (TelegramUser?) -> Unit) {
+        FirebaseService.getUserProfile(uid, onResult)
     }
 
     fun logOut() {
@@ -279,6 +581,16 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
             val chatId = _activeChat.value?.id
             if (chatId != null) FirebaseService.messagesRef.child(chatId).removeEventListener(listener)
         }
+        typingListener?.let { listener ->
+            val chatId = _activeChat.value?.id
+            if (chatId != null) FirebaseService.chatsRef.child(chatId).child("typing").removeEventListener(listener)
+        }
+
+        chatsMessagesListeners.forEach { (cid, listener) ->
+            FirebaseService.messagesRef.child(cid).removeEventListener(listener)
+        }
+        chatsMessagesListeners.clear()
+        _unreadCounts.value = emptyMap()
 
         FirebaseService.auth.signOut()
         _authState.value = AuthState.Unauthenticated
@@ -289,6 +601,23 @@ class TelegramViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
-        logOut()
+        currentUserListener?.let {
+            val uid = FirebaseService.currentUid
+            if (uid != null) FirebaseService.usersRef.child(uid).removeEventListener(it)
+        }
+        chatsListener?.let { FirebaseService.chatsRef.removeEventListener(it) }
+        messagesListener?.let { listener ->
+            val chatId = _activeChat.value?.id
+            if (chatId != null) FirebaseService.messagesRef.child(chatId).removeEventListener(listener)
+        }
+        typingListener?.let { listener ->
+            val chatId = _activeChat.value?.id
+            if (chatId != null) FirebaseService.chatsRef.child(chatId).child("typing").removeEventListener(listener)
+        }
+
+        chatsMessagesListeners.forEach { (cid, listener) ->
+            FirebaseService.messagesRef.child(cid).removeEventListener(listener)
+        }
+        chatsMessagesListeners.clear()
     }
 }
