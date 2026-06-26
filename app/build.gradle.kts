@@ -13,7 +13,7 @@ android {
   defaultConfig {
     applicationId = "com.denster.menejer"
     minSdk = 24
-    targetSdk = 36
+    targetSdk = 34
     versionCode = 1
     versionName = "1.0"
 
@@ -122,3 +122,49 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+tasks.register("copyDebugApk") {
+    dependsOn("assembleDebug")
+    doLast {
+        val srcApk = file("build/outputs/apk/debug/app-debug.apk")
+        val dest1 = file("${rootDir}/.build-outputs/app-debug.apk")
+        val dest2 = file("${rootDir}/APK_DOWNLOAD/app-debug.apk")
+        val destZip1 = file("${rootDir}/.build-outputs/app-debug.apk.zip")
+        val destZip2 = file("${rootDir}/APK_DOWNLOAD/app-debug.apk.zip")
+        val destZip3 = file("${rootDir}/APK_DOWNLOAD/app-debug.zip")
+        
+        if (!srcApk.exists()) {
+            throw GradleException("Source APK not found at: ${srcApk.absolutePath}")
+        }
+        
+        dest1.parentFile.mkdirs()
+        dest2.parentFile.mkdirs()
+        
+        fun copyFile(src: File, dest: File) {
+            src.inputStream().use { input ->
+                dest.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        }
+        
+        copyFile(srcApk, dest1)
+        copyFile(srcApk, dest2)
+        copyFile(srcApk, destZip1)
+        copyFile(srcApk, destZip2)
+        copyFile(srcApk, destZip3)
+        
+        println("--- APK COPY COMPLETED WITH ZIP VARIATIONS ---")
+        println("Source APK: ${srcApk.absolutePath} (Size: ${srcApk.length()} bytes)")
+        println("Dest 1 APK: ${dest1.absolutePath} (Size: ${dest1.length()} bytes)")
+        println("Dest 2 APK: ${dest2.absolutePath} (Size: ${dest2.length()} bytes)")
+        println("Dest Zip 1: ${destZip1.absolutePath} (Size: ${destZip1.length()} bytes)")
+        println("Dest Zip 2: ${destZip2.absolutePath} (Size: ${destZip2.length()} bytes)")
+        println("Dest Zip 3: ${destZip3.absolutePath} (Size: ${destZip3.length()} bytes)")
+    }
+}
+
+
+
+
+
