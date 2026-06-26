@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="18.0"
+        android:translateY="18.0">
+        <!-- 72x72 scaled paper plane centered vector -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M12,33.5 L57,15 L48.5,58 L33.5,46.5 L24.5,55 L26.5,43 Z" />
+    </group>
+</vector>
